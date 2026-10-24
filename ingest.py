@@ -1,82 +1,171 @@
-#Find files under data/
-#Extract thei rtext
-#Split the text into 700 character chunks with overlap 
-#Attach metadata to every chunk such as department and source
-#Add chunks to chroma collectoin 
-
-#Default embedding model used by ChromaDB is all-MiniLM-L6-v2
-from pathlib import Path
-import chromadb
 import csv
+from pathlib import Path
+
+import chromadb
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-client = chromadb.PersistentClient(path="chroma_db")
 
-collection = client.get_or_create_collection(
-    name="company_documents"
+CHROMA_PATH = "chroma_db"
+COLLECTION_NAME = "company_documents"
+
+DATA_FOLDER = Path("data")
+HR_CSV_PATH = DATA_FOLDER / "hr" / "hr_data.csv"
+
+
+# Connect to ChromaDB.
+client = chromadb.PersistentClient(path=CHROMA_PATH)
+
+
+# Rebuild the collection whenever ingest.py runs.
+# This prevents old or duplicate chunks from remaining.
+existing_collections = client.list_collections()
+
+existing_names = [
+    item.name if hasattr(item, "name") else str(item)
+    for item in existing_collections
+]
+
+if COLLECTION_NAME in existing_names:
+    client.delete_collection(name=COLLECTION_NAME)
+
+collection = client.create_collection(
+    name=COLLECTION_NAME
 )
 
-#Create a text splitter that breaks long text into smaller chunks 
-#Where each chink size is 800 characters and chunk overlap is 100 characters
-#This text splitter tries to split at natural boundaries like ends of paragraphs or sentences
+
+# Used for normal Markdown documents.
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=800,
     chunk_overlap=100
 )
 
-data_folder = Path("data")
 
-chunk_ids = []
-chunk_texts = []
-chunk_metadata = []
+document_ids = []
+document_texts = []
+document_metadata = []
 
-#This loop goes through each md file in the data folder
-#It splits the text in each file into chunks and labels it 
 
-for file_path in data_folder.rglob("*.md"):
-    print(f"Reading: {file_path}")
+# -------------------------------------------------
+# Ingest normal Markdown documents
+# -------------------------------------------------
+
+for file_path in DATA_FOLDER.rglob("*.md"):
+
+    # Ignore the old generated HR Markdown file.
+    # HR records will now be read directly from the CSV.
+    if (
+        file_path.name == "hr_data.md"
+        and file_path.parent.name.lower() == "hr"
+    ):
+        print(f"Skipping old generated file: {file_path}")
+        continue
+
+    print(f"Reading Markdown: {file_path}")
 
     text = file_path.read_text(encoding="utf-8")
     chunks = text_splitter.split_text(text)
 
-    # If file is data/hr/policy.md, department becomes "hr"
-    #Get the file path without data/ part so hr/policy.md
-    relative_path = file_path.relative_to(data_folder)
+    relative_path = file_path.relative_to(DATA_FOLDER)
 
-    #If file is within a sub folder then use the first folder name
     if len(relative_path.parts) > 1:
         department = relative_path.parts[0].lower()
     else:
         department = "general"
 
-    #Go through each chunk
-    #Enumerate gives each chunk a number from 0 
     for chunk_number, chunk in enumerate(chunks):
-        # Every chunk needs a unique ID
-        chunk_id = f"{relative_path}-{chunk_number}"
 
-        chunk_ids.append(chunk_id)
-        chunk_texts.append(chunk)
+        document_id = (
+            f"markdown:"
+            f"{relative_path.as_posix()}:"
+            f"{chunk_number}"
+        )
 
-        chunk_metadata.append({
-            "source": str(relative_path),
+        document_ids.append(document_id)
+        document_texts.append(chunk)
+
+        document_metadata.append({
+            "source": relative_path.as_posix(),
             "department": department,
+            "record_type": "document_chunk",
             "chunk_number": chunk_number
         })
 
-    #if no chunks were collected, then this is printed
-if not chunk_texts:
-    print("No .md files found inside the data folder.")
 
-    #upsert stores the chunks into the collection with Ids and metadata
-    #Chroma creates embeddings for the text using collection's embedding function 
+# -------------------------------------------------
+# Ingest HR CSV
+# One employee row = one Chroma document
+# -------------------------------------------------
+
+if HR_CSV_PATH.exists():
+
+    print(f"Reading employee records: {HR_CSV_PATH}")
+
+    with HR_CSV_PATH.open(
+        mode="r",
+        encoding="utf-8-sig",
+        newline=""
+    ) as csv_file:
+
+        reader = csv.DictReader(csv_file)
+
+        for row in reader:
+
+            employee_id = row["employee_id"].strip().upper()
+            full_name = row["full_name"].strip()
+
+            # Convert this employee's complete row into searchable text.
+            employee_text = "\n".join(
+                f"{column.replace('_', ' ').title()}: {value}"
+                for column, value in row.items()
+            )
+
+            document_ids.append(
+                f"employee:{employee_id}"
+            )
+
+            document_texts.append(employee_text)
+
+            document_metadata.append({
+                # "hr" means this is protected HR information.
+                "department": "hr",
+
+                "record_type": "employee",
+                "employee_id": employee_id,
+                "full_name": full_name,
+
+                # This is the employee's actual working department.
+                "employee_department": row[
+                    "department"
+                ].strip(),
+
+                "job_role": row["role"].strip(),
+                "source": "hr/hr_data.csv"
+            })
+
 else:
-    # Chroma automatically creates embeddings and stores everything
-    collection.upsert(
-        ids=chunk_ids,
-        documents=chunk_texts,
-        metadatas=chunk_metadata        
+    print(f"HR CSV not found: {HR_CSV_PATH}")
+
+
+# -------------------------------------------------
+# Store everything in ChromaDB
+# -------------------------------------------------
+
+if not document_texts:
+    print("No documents were found.")
+
+else:
+    collection.add(
+        ids=document_ids,
+        documents=document_texts,
+        metadatas=document_metadata
     )
 
-print(f"Successfully ingested {len(chunk_texts)} chunks.")
-print(f"Total chunks in ChromaDB: {collection.count()}")
+    print(
+        f"Successfully ingested "
+        f"{len(document_texts)} documents."
+    )
+
+    print(
+        f"Total documents in ChromaDB: "
+        f"{collection.count()}"
+    )

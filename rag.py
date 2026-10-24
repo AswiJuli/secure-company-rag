@@ -33,23 +33,176 @@ ROLE_ACCESS = {
     "hr": ["general","hr"],
 }
 
+MAX_CHROMA_DISTANCE = float(
+    os.getenv("MAX_CHROMA_DISTANCE", "1.5")
+)
+
+def create_result(
+    ids,
+    documents,
+    metadatas,
+    distances
+):
+    """
+    Creates a result dictionary in the same shape returned
+    by collection.query().
+    """
+
+    return {
+        "ids": [ids],
+        "documents": [documents],
+        "metadatas": [metadatas],
+        "distances": [distances]
+    }
+
+
+def retrieve_exact_employee(
+    question,
+    allowed_departments
+):
+    """
+    Finds an exact employee ID or full name before performing
+    semantic retrieval.
+
+    This lookup is allowed only when the authenticated role
+    has permission to access HR documents.
+    """
+
+    if "hr" not in allowed_departments:
+        return None
+
+    normalized_question = question.lower()
+
+    employee_records = collection.get(
+        where={
+            "$and": [
+                {"department": "hr"},
+                {"record_type": "employee"}
+            ]
+        },
+        include=[
+            "documents",
+            "metadatas"
+        ]
+    )
+
+    matching_ids = []
+    matching_documents = []
+    matching_metadatas = []
+
+    for (
+        document_id,
+        document,
+        metadata
+    ) in zip(
+        employee_records["ids"],
+        employee_records["documents"],
+        employee_records["metadatas"]
+    ):
+
+        employee_id = metadata[
+            "employee_id"
+        ].lower()
+
+        full_name = metadata[
+            "full_name"
+        ].lower()
+
+        if (
+            employee_id in normalized_question
+            or full_name in normalized_question
+        ):
+            matching_ids.append(document_id)
+            matching_documents.append(document)
+            matching_metadatas.append(metadata)
+
+    if not matching_documents:
+        return None
+
+    return create_result(
+        ids=matching_ids,
+        documents=matching_documents,
+        metadatas=matching_metadatas,
+        distances=[0.0] * len(matching_documents)
+    )
+
+
+def filter_by_relevance(results):
+    """
+    Removes semantic results whose Chroma distance is too high.
+
+    Smaller distance means more similar.
+    Larger distance means less relevant.
+    """
+
+    ids = results["ids"][0]
+    documents = results["documents"][0]
+    metadatas = results["metadatas"][0]
+    distances = results["distances"][0]
+
+    filtered_ids = []
+    filtered_documents = []
+    filtered_metadatas = []
+    filtered_distances = []
+
+    for (
+        document_id,
+        document,
+        metadata,
+        distance
+    ) in zip(
+        ids,
+        documents,
+        metadatas,
+        distances
+    ):
+
+        if distance <= MAX_CHROMA_DISTANCE:
+            filtered_ids.append(document_id)
+            filtered_documents.append(document)
+            filtered_metadatas.append(metadata)
+            filtered_distances.append(distance)
+
+    return create_result(
+        ids=filtered_ids,
+        documents=filtered_documents,
+        metadatas=filtered_metadatas,
+        distances=filtered_distances
+    )
+
+
 def retrieve_documents(question, role):
+    if role not in ROLE_ACCESS:
+        raise ValueError("Invalid role.")
+
     allowed_departments = ROLE_ACCESS[role]
 
+    # First try exact employee ID/full-name matching.
+    exact_employee_result = retrieve_exact_employee(
+        question=question,
+        allowed_departments=allowed_departments
+    )
+
+    if exact_employee_result is not None:
+        return exact_employee_result
+
+    # Otherwise, perform normal semantic retrieval.
     results = collection.query(
         query_texts=[question],
         n_results=10,
-
-        # RBAC metadata filter, only search chunks where department is in allowed departments
         where={
-             "department": {
+            "department": {
                 "$in": allowed_departments
             }
-        }
+        },
+        include=[
+            "documents",
+            "metadatas",
+            "distances"
+        ]
     )
 
-    return results
-
+    return filter_by_relevance(results)
 
 def generate_answer(question, results):
     documents = results["documents"][0]
