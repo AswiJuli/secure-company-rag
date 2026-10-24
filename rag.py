@@ -29,16 +29,8 @@ ROLE_ACCESS = {
     "marketing": ["general", "marketing"],
 
     # Executives can access everything
-    "executive": [
-        "general",
-        "engineering",
-        "finance",
-        "marketing"
-    ],
-    "hr": [
-        "general",
-        "hr"
-    ],
+    "executive": ["general", "engineering", "finance", "marketing", "hr"],
+    "hr": ["general","hr"],
 }
 
 def retrieve_documents(question, role):
