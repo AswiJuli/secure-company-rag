@@ -66,7 +66,7 @@ for file_path in DATA_FOLDER.rglob("*.md"):
         department = "general"
 
     for chunk_number, chunk in enumerate(chunks):
-
+    #Craete a unique document id
         document_id = (
             f"markdown:"
             f"{relative_path.as_posix()}:"

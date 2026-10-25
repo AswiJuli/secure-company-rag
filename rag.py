@@ -33,7 +33,12 @@ ROLE_ACCESS = {
 }
 
 MAX_CHROMA_DISTANCE = float(
-    os.getenv("MAX_CHROMA_DISTANCE", "1.5")
+    os.getenv("MAX_CHROMA_DISTANCE", "1.7")
+)
+
+print(
+    "MAX_CHROMA_DISTANCE:",
+    MAX_CHROMA_DISTANCE
 )
 
 def create_result(

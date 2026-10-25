@@ -8,3 +8,4 @@ test-groq.py
 *.pyc
 .streamlit/secrets.toml
 users.db
+MAX_CHROMA_DISTANCE=1.7

@@ -1,79 +1,247 @@
-import os
-from datetime import datetime, timedelta, timezone
+from contextlib import asynccontextmanager
 
-import jwt
-from dotenv import load_dotenv
-from jwt.exceptions import InvalidTokenError
-from pwdlib import PasswordHash
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    status
+)
+from fastapi.security import (
+    OAuth2PasswordBearer,
+    OAuth2PasswordRequestForm
+)
+from pydantic import BaseModel, Field
+
+from auth import (
+    create_access_token,
+    decode_access_token,
+    verify_password
+)
+from database import (
+    get_user,
+    initialize_database
+)
+from guardrails import check_input
+from rag import answer_question
 
 
-load_dotenv()
+# This runs once when FastAPI starts.
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    initialize_database()
+    yield
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 
-if not SECRET_KEY:
-    raise RuntimeError(
-        "JWT_SECRET_KEY is missing from the .env file."
+app = FastAPI(
+    title="Secure Company RAG API",
+    description=(
+        "Authenticated internal company chatbot "
+        "with RBAC and hybrid retrieval."
+    ),
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+
+# Tells FastAPI that clients obtain tokens from /token.
+oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl="token"
+)
+
+
+# -------------------------------------------------
+# Request and response models
+# -------------------------------------------------
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+
+
+class UserResponse(BaseModel):
+    username: str
+    role: str
+    is_active: bool
+
+
+class ChatRequest(BaseModel):
+    question: str = Field(
+        min_length=1,
+        max_length=2000
     )
 
-ALGORITHM = "HS256"
-TOKEN_EXPIRY_MINUTES = 30
 
-password_hasher = PasswordHash.recommended()
+class ChatResponse(BaseModel):
+    answer: str
+    sources: list[str]
 
 
-def hash_password(password):
+# -------------------------------------------------
+# Authentication helpers
+# -------------------------------------------------
+
+def authenticate_user(username, password):
     """
-    Converts a password into a secure Argon2 hash.
-    The original password cannot be recovered from the hash.
+    Verifies the employee ID and password.
+
+    Returns the database user when authentication succeeds.
+    Returns None when authentication fails.
     """
-    return password_hasher.hash(password)
+
+    user = get_user(username)
+
+    if user is None:
+        return None
+
+    if not user["is_active"]:
+        return None
+
+    if not verify_password(
+        plain_password=password,
+        stored_hash=user["password_hash"]
+    ):
+        return None
+
+    return user
 
 
-def verify_password(plain_password, stored_hash):
+def get_current_user(
+    token: str = Depends(oauth2_scheme)
+):
     """
-    Checks whether the entered password matches the stored hash.
+    Decodes the Bearer token and retrieves the current
+    user from SQLite.
     """
-    return password_hasher.verify(
-        plain_password,
-        stored_hash
+
+    credentials_error = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials.",
+        headers={
+            "WWW-Authenticate": "Bearer"
+        }
     )
 
+    username = decode_access_token(token)
 
-def create_access_token(username):
-    """
-    Creates a signed JWT identifying the logged-in user.
-    """
-    expiry_time = datetime.now(timezone.utc) + timedelta(
-        minutes=TOKEN_EXPIRY_MINUTES
-    )
+    if username is None:
+        raise credentials_error
 
-    token_data = {
-        "sub": username,
-        "exp": expiry_time
-    }
+    user = get_user(username)
 
-    return jwt.encode(
-        token_data,
-        SECRET_KEY,
-        algorithm=ALGORITHM
-    )
+    if user is None:
+        raise credentials_error
 
-
-def decode_access_token(token):
-    """
-    Verifies the JWT and returns the username inside it.
-
-    Returns None if the token is invalid or expired.
-    """
-    try:
-        payload = jwt.decode(
-            token,
-            SECRET_KEY,
-            algorithms=[ALGORITHM]
+    if not user["is_active"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This user account is inactive."
         )
 
-        return payload.get("sub")
+    return user
 
-    except InvalidTokenError:
-        return None
+
+# -------------------------------------------------
+# API endpoints
+# -------------------------------------------------
+
+@app.get("/")
+def root():
+    return {
+        "message": "Secure Company RAG API is running."
+    }
+
+
+@app.post(
+    "/token",
+    response_model=TokenResponse
+)
+def login(
+    form_data: OAuth2PasswordRequestForm = Depends()
+):
+    """
+    Authenticates an employee and returns a signed JWT.
+    """
+
+    user = authenticate_user(
+        username=form_data.username,
+        password=form_data.password
+    )
+
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect employee ID or password.",
+            headers={
+                "WWW-Authenticate": "Bearer"
+            }
+        )
+
+    access_token = create_access_token(
+        username=user["username"]
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer"
+    }
+
+
+@app.get(
+    "/me",
+    response_model=UserResponse
+)
+def read_current_user(
+    current_user=Depends(get_current_user)
+):
+    """
+    Returns the authenticated employee's account details.
+    """
+
+    return {
+        "username": current_user["username"],
+        "role": current_user["role"],
+        "is_active": bool(
+            current_user["is_active"]
+        )
+    }
+
+
+@app.post(
+    "/chat",
+    response_model=ChatResponse
+)
+def chat(
+    request: ChatRequest,
+    current_user=Depends(get_current_user)
+):
+    """
+    Answers a question using the role stored in SQLite.
+    The client cannot select its own role.
+    """
+
+    question = request.question.strip()
+
+    allowed, reason = check_input(question)
+
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Request blocked: {reason}"
+        )
+
+    try:
+        answer, sources = answer_question(
+            question=question,
+            role=current_user["role"]
+        )
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error)
+        ) from error
+
+    return {
+        "answer": answer,
+        "sources": sources
+    }
