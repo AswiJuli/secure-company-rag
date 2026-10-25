@@ -59,6 +59,11 @@ OUT_OF_SCOPE_PATTERNS = [
     ),
 
     re.compile(
+        r"\b(election|elections)\b",
+        re.IGNORECASE
+    ),
+
+    re.compile(
         r"\b(movie|film)s?\b"
         r".{0,30}"
         r"\b(watch|recommend|suggest)\b",
