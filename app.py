@@ -107,7 +107,7 @@ if st.session_state.access_token is None:
                         "username": employee_id.strip(),
                         "password": password
                     },
-                    timeout=15
+                    timeout=90
                 )
 
                 if login_response.status_code == 200:
@@ -121,7 +121,7 @@ if st.session_state.access_token is None:
                     user_response = requests.get(
                         f"{API_BASE_URL}/me",
                         headers=get_auth_headers(),
-                        timeout=15
+                        timeout=90
                     )
 
                     if user_response.status_code == 200:

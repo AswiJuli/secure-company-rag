@@ -245,3 +245,9 @@ def chat(
         "answer": answer,
         "sources": sources
     }
+
+@app.get("/health")
+def health_check():
+    return {
+        "status": "healthy"
+    }
