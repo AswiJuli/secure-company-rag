@@ -4,7 +4,7 @@ import chromadb
 from dotenv import load_dotenv
 from groq import Groq
 from guardrails import check_input
-
+from structured_query import try_structured_employee_query
 
 load_dotenv()
 
@@ -27,7 +27,6 @@ ROLE_ACCESS = {
     "engineering": ["general", "engineering"],
     "finance": ["general", "finance"],
     "marketing": ["general", "marketing"],
-
     # Executives can access everything
     "executive": ["general", "engineering", "finance", "marketing", "hr"],
     "hr": ["general","hr"],
@@ -280,6 +279,30 @@ QUESTION:
 
     return answer, sources
 
+def answer_question(question, role):
+    """
+    Routes structured employee questions to the CSV engine.
+    All other questions use the existing RAG pipeline.
+    """
+
+    structured_result = try_structured_employee_query(
+        question=question,
+        role=role
+    )
+
+    if structured_result is not None:
+        return structured_result
+
+    results = retrieve_documents(
+        question=question,
+        role=role
+    )
+
+    return generate_answer(
+        question=question,
+        results=results
+    )
+
 
 def main():
     print("Available roles:")
@@ -301,9 +324,10 @@ def main():
         print(f"\nRequest blocked: {reason}")
         return
 
-    results = retrieve_documents(question, role)
-    answer, sources = generate_answer(question, results)
-
+    answer, sources = answer_question(
+    question=question,
+    role=role
+)
     print("\nAssistant:")
     print(answer)
 

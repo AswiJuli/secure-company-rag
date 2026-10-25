@@ -2,10 +2,12 @@ import csv
 from pathlib import Path
 
 import chromadb
+#Divides large markdown files into smaller chunks and splits at sensible places
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
 CHROMA_PATH = "chroma_db"
+#Collection holds document text, embedding, ID, metadata
 COLLECTION_NAME = "company_documents"
 
 DATA_FOLDER = Path("data")
@@ -18,6 +20,7 @@ client = chromadb.PersistentClient(path=CHROMA_PATH)
 
 # Rebuild the collection whenever ingest.py runs.
 # This prevents old or duplicate chunks from remaining.
+#Checks if collection with same name already exists and then deletes previous collection
 existing_collections = client.list_collections()
 
 existing_names = [
@@ -50,16 +53,6 @@ document_metadata = []
 # -------------------------------------------------
 
 for file_path in DATA_FOLDER.rglob("*.md"):
-
-    # Ignore the old generated HR Markdown file.
-    # HR records will now be read directly from the CSV.
-    if (
-        file_path.name == "hr_data.md"
-        and file_path.parent.name.lower() == "hr"
-    ):
-        print(f"Skipping old generated file: {file_path}")
-        continue
-
     print(f"Reading Markdown: {file_path}")
 
     text = file_path.read_text(encoding="utf-8")
